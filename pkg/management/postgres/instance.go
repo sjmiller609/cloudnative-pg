@@ -226,6 +226,20 @@ func (instance *Instance) ConfigureSlotReplicator(config *apiv1.ReplicationSlots
 	}()
 }
 
+// VerifyPgDataCoherence checks the PGDATA is correctly configured in terms
+// of file rights and users
+func (instance *Instance) VerifyPgDataCoherence(ctx context.Context) error {
+	contextLogger := log.FromContext(ctx)
+
+	contextLogger.Debug("Checking PGDATA coherence")
+
+	if err := fileutils.EnsurePgDataPerms(instance.PgData); err != nil {
+		return err
+	}
+
+	return WritePostgresUserMaps(instance.PgData)
+}
+
 // SlotReplicatorChan returns the communication channel to the slot replicator
 func (instance *Instance) SlotReplicatorChan() <-chan *apiv1.ReplicationSlotsConfiguration {
 	return instance.slotsReplicatorChan

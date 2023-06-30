@@ -832,14 +832,6 @@ func (r *Cluster) validateBootstrapRecoveryDataSource() field.ErrorList {
 	}
 
 	result := validateVolumeSnapshotSource(recoverySection.VolumeSnapshots.Storage, recoveryPath.Child("storage"))
-	if recoverySection.RecoveryTarget != nil {
-		result = append(
-			result,
-			field.Invalid(
-				recoveryPath.Child("recoveryTarget"),
-				r.Spec.Bootstrap.Recovery.RecoveryTarget,
-				"A recovery target cannot be set while recovering from a DataSource"))
-	}
 
 	if recoverySection.VolumeSnapshots.WalStorage != nil && r.Spec.WalStorage == nil {
 		walStoragePath := recoveryPath.Child("dataSource", "walStorage")

@@ -75,6 +75,70 @@ var (
 	}
 )
 
+// RestoreSnapshot ia invoked TODO
+func (info InitInfo) RestoreSnapshot(ctx context.Context) error {
+	typedClient, err := management.NewControllerRuntimeClient()
+	if err != nil {
+		return err
+	}
+
+	cluster, err := info.loadCluster(ctx, typedClient)
+	if err != nil {
+		return err
+	}
+
+	if cluster.Spec.Bootstrap == nil || cluster.Spec.Bootstrap.Recovery == nil ||
+		cluster.Spec.Bootstrap.Recovery.RecoveryTarget == nil {
+		// We are recovering from an existing PVC snapshot, we
+		// don't need to invoke the recovery job
+		return nil
+	}
+
+	// TODO: create a fake backup suited for snapshot recovery.
+
+	// TODO: loadbackup isnt good for our case
+	// If we need to download data from a backup, we do it
+	backup, env, err := info.loadBackup(ctx, typedClient, cluster)
+	if err != nil {
+		return err
+	}
+
+	if _, err := info.restoreCustomWalDir(ctx); err != nil {
+		return err
+	}
+
+	if err := info.WriteInitialPostgresqlConf(cluster); err != nil {
+		return err
+	}
+
+	if cluster.IsReplica() {
+		server, ok := cluster.ExternalCluster(cluster.Spec.ReplicaCluster.Source)
+		if !ok {
+			return fmt.Errorf("missing external cluster: %v", cluster.Spec.ReplicaCluster.Source)
+		}
+
+		connectionString, _, err := external.ConfigureConnectionToServer(
+			ctx, typedClient, info.Namespace, &server)
+		if err != nil {
+			return err
+		}
+
+		// TODO: Using a replication slot on replica cluster is not supported (yet?)
+		_, err = UpdateReplicaConfiguration(info.PgData, connectionString, "")
+		return err
+	}
+
+	if err := info.WriteRestoreHbaConf(); err != nil {
+		return err
+	}
+
+	if err := info.writeRestoreWalConfig(backup, cluster); err != nil {
+		return err
+	}
+
+	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
+}
+
 // Restore restores a PostgreSQL cluster from a backup into the object storage
 func (info InitInfo) Restore(ctx context.Context) error {
 	typedClient, err := management.NewControllerRuntimeClient()
@@ -142,7 +206,7 @@ func (info InitInfo) Restore(ctx context.Context) error {
 		return err
 	}
 
-	return info.ConfigureInstanceAfterRestore(cluster, env)
+	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
 }
 
 // restoreCustomWalDir moves the current pg_wal data to the specified custom wal dir and applies the symlink
@@ -358,13 +422,6 @@ func (info InitInfo) loadBackupFromReference(
 // to complete the WAL recovery from the object storage and then start
 // as a new primary
 func (info InitInfo) writeRestoreWalConfig(backup *apiv1.Backup, cluster *apiv1.Cluster) error {
-	// Ensure restore_command is used to correctly recover WALs
-	// from the object storage
-	major, err := postgresutils.GetMajorVersion(info.PgData)
-	if err != nil {
-		return fmt.Errorf("cannot detect major version: %w", err)
-	}
-
 	const barmanCloudWalRestoreName = "barman-cloud-wal-restore"
 
 	cmd := []string{barmanCloudWalRestoreName}
@@ -374,7 +431,7 @@ func (info InitInfo) writeRestoreWalConfig(backup *apiv1.Backup, cluster *apiv1.
 	cmd = append(cmd, backup.Status.DestinationPath)
 	cmd = append(cmd, backup.Status.ServerName)
 
-	cmd, err = barman.AppendCloudProviderOptionsFromBackup(cmd, backup)
+	cmd, err := barman.AppendCloudProviderOptionsFromBackup(cmd, backup)
 	if err != nil {
 		return err
 	}
@@ -387,6 +444,17 @@ func (info InitInfo) writeRestoreWalConfig(backup *apiv1.Backup, cluster *apiv1.
 			"%s",
 		strings.Join(cmd, " "),
 		cluster.Spec.Bootstrap.Recovery.RecoveryTarget.BuildPostgresOptions())
+
+	return info.writeRecoveryConfiguration(recoveryFileContents)
+}
+
+func (info InitInfo) writeRecoveryConfiguration(recoveryFileContents string) error {
+	// Ensure restore_command is used to correctly recover WALs
+	// from the object storage
+	major, err := postgresutils.GetMajorVersion(info.PgData)
+	if err != nil {
+		return fmt.Errorf("cannot detect major version: %w", err)
+	}
 
 	log.Info("Generated recovery configuration", "configuration", recoveryFileContents)
 	// Disable archiving
@@ -574,9 +642,16 @@ func (info InitInfo) WriteRestoreHbaConf() error {
 // of the instance to be coherent with the one specified in the
 // cluster. This function also ensures that we can really connect
 // to this cluster using the password in the secrets
-func (info InitInfo) ConfigureInstanceAfterRestore(cluster *apiv1.Cluster, env []string) error {
+func (info InitInfo) ConfigureInstanceAfterRestore(ctx context.Context, cluster *apiv1.Cluster, env []string) error {
+	contextLogger := log.FromContext(ctx)
+
 	instance := info.GetInstance()
 	instance.Env = env
+
+	if err := instance.VerifyPgDataCoherence(ctx); err != nil {
+		contextLogger.Error(err, "while ensuring pgData coherence")
+		return err
+	}
 
 	majorVersion, err := postgresutils.GetMajorVersion(info.PgData)
 	if err != nil {

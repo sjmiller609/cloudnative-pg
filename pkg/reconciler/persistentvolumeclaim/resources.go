@@ -143,7 +143,7 @@ func (e *expectedPVC) toCreateConfiguration(
 
 	if source != nil {
 		cc.Source = source
-		cc.Status = StatusReady
+		cc.Status = StatusInitializing
 	}
 
 	return cc
