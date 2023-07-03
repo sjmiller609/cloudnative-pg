@@ -948,14 +948,14 @@ func (r *ClusterReconciler) createPrimaryInstance(
 			}
 		}
 
-		if cluster.Spec.Bootstrap.Recovery.VolumeSnapshots == nil {
-			r.Recorder.Event(cluster, "Normal", "CreatingInstance", "Primary instance (from backup)")
-			job = specs.CreatePrimaryJobViaRecovery(*cluster, nodeSerial, backup)
+		if cluster.Spec.Bootstrap.Recovery.VolumeSnapshots != nil {
+			r.Recorder.Event(cluster, "Normal", "CreatingInstance", "Primary instance (from volumesnapshot)")
+			job = specs.CreatePrimaryJobViaRestoreSnapshot(*cluster, nodeSerial, backup)
 			break
 		}
 
-		r.Recorder.Event(cluster, "Normal", "CreatingInstance", "Primary instance (from volumesnapshot)")
-		job = specs.CreatePrimaryJobViaRestoreSnapshot(*cluster, nodeSerial, backup)
+		r.Recorder.Event(cluster, "Normal", "CreatingInstance", "Primary instance (from backup)")
+		job = specs.CreatePrimaryJobViaRecovery(*cluster, nodeSerial, backup)
 	case cluster.Spec.Bootstrap != nil && cluster.Spec.Bootstrap.PgBaseBackup != nil:
 		r.Recorder.Event(cluster, "Normal", "CreatingInstance", "Primary instance (from physical backup)")
 		job = specs.CreatePrimaryJobViaPgBaseBackup(*cluster, nodeSerial)

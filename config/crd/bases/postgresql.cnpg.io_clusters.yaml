@@ -1456,7 +1456,7 @@ spec:
                       backup:
                         description: The backup object containing the physical base
                           backup from which to initiate the recovery procedure. Mutually
-                          exclusive with `source`.
+                          exclusive with `source` and `volumeSnapshots`.
                         properties:
                           endpointCA:
                             description: EndpointCA store the CA bundle of the barman

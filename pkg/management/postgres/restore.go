@@ -94,11 +94,8 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context) error {
 		return nil
 	}
 
-	// TODO: create a fake backup suited for snapshot recovery.
-
-	// TODO: loadbackup isnt good for our case
-	// If we need to download data from a backup, we do it
-	backup, env, err := info.loadBackup(ctx, typedClient, cluster)
+	// TODO: terrible name
+	backup, env, err := info.loadBackupObjectOnlyFromExternalCluster(ctx, typedClient, cluster)
 	if err != nil {
 		return err
 	}
@@ -379,6 +376,53 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 			Error:             targetBackup.Error,
 			CommandOutput:     "",
 			CommandError:      "",
+		},
+	}, env, nil
+}
+
+// loadBackupOnlyObjectFromExternalCluster TODO
+func (info InitInfo) loadBackupObjectOnlyFromExternalCluster(
+	ctx context.Context,
+	typedClient client.Client,
+	cluster *apiv1.Cluster,
+) (*apiv1.Backup, []string, error) {
+	sourceName := cluster.Spec.Bootstrap.Recovery.Source
+
+	if sourceName == "" {
+		return nil, nil, fmt.Errorf("recovery source not specified")
+	}
+
+	log.Info("Recovering from external cluster", "sourceName", sourceName)
+
+	server, found := cluster.ExternalCluster(sourceName)
+	if !found {
+		return nil, nil, fmt.Errorf("missing external cluster: %v", sourceName)
+	}
+	serverName := server.GetServerName()
+
+	env, err := barmanCredentials.EnvSetRestoreCloudCredentials(
+		ctx,
+		typedClient,
+		cluster.Namespace,
+		server.BarmanObjectStore,
+		os.Environ())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &apiv1.Backup{
+		Spec: apiv1.BackupSpec{
+			Cluster: apiv1.LocalObjectReference{
+				Name: serverName,
+			},
+		},
+		Status: apiv1.BackupStatus{
+			BarmanCredentials: server.BarmanObjectStore.BarmanCredentials,
+			EndpointCA:        server.BarmanObjectStore.EndpointCA,
+			EndpointURL:       server.BarmanObjectStore.EndpointURL,
+			DestinationPath:   server.BarmanObjectStore.DestinationPath,
+			ServerName:        serverName,
+			Phase:             apiv1.BackupPhaseCompleted,
 		},
 	}, env, nil
 }

@@ -1114,7 +1114,7 @@ type PostInitApplicationSQLRefs struct {
 type BootstrapRecovery struct {
 	// The backup object containing the physical base backup from which to
 	// initiate the recovery procedure.
-	// Mutually exclusive with `source`.
+	// Mutually exclusive with `source` and `volumeSnapshots`.
 	Backup *BackupSource `json:"backup,omitempty"`
 
 	// The external cluster whose backup we will restore. This is also

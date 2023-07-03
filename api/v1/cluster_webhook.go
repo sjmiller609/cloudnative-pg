@@ -813,15 +813,6 @@ func (r *Cluster) validateBootstrapRecoveryDataSource() field.ErrorList {
 
 	recoveryPath := field.NewPath("spec", "bootstrap", "recovery")
 	recoverySection := r.Spec.Bootstrap.Recovery
-	if recoverySection.Source != "" {
-		return field.ErrorList{
-			field.Invalid(
-				recoveryPath.Child("dataSource"),
-				r.Spec.Bootstrap.Recovery.VolumeSnapshots,
-				"Recovery from dataSource is not compatible with other types of recovery"),
-		}
-	}
-
 	if recoverySection.Backup != nil {
 		return field.ErrorList{
 			field.Invalid(
