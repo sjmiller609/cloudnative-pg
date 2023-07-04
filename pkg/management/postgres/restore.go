@@ -99,6 +99,8 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	contextLogger := log.FromContext(ctx)
+	contextLogger.Info("DEBUG", "backup", backup, "env", env)
 
 	if _, err := info.restoreCustomWalDir(ctx); err != nil {
 		return err
