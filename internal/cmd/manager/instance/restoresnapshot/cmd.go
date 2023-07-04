@@ -1,4 +1,4 @@
-// Package restoresnapshot todo
+// Package restoresnapshot implements the logic to bootstrap the restored snapshot volumes
 package restoresnapshot
 
 import (
@@ -62,5 +62,10 @@ func NewCmd() *cobra.Command {
 }
 
 func execute(ctx context.Context, info postgres.InitInfo) error {
-	return info.RestoreSnapshot(ctx)
+	typedClient, err := management.NewControllerRuntimeClient()
+	if err != nil {
+		return err
+	}
+
+	return info.RestoreSnapshot(ctx, typedClient)
 }
