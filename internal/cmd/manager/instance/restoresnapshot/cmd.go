@@ -1,4 +1,3 @@
-// Package restoresnapshot implements the logic to bootstrap the restored snapshot volumes
 package restoresnapshot
 
 import (
@@ -52,11 +51,11 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&clusterName, "cluster-name", os.Getenv("CLUSTER_NAME"), "The name of the "+
-		"current cluster in k8s, used to coordinate switchover and failover")
+		"cluster containing the PVC snapshot to be restored")
 	cmd.Flags().StringVar(&namespace, "namespace", os.Getenv("NAMESPACE"), "The namespace of "+
-		"the cluster and the Pod in k8s")
-	cmd.Flags().StringVar(&pgData, "pg-data", os.Getenv("PGDATA"), "The PGDATA to be created")
-	cmd.Flags().StringVar(&pgWal, "pg-wal", "", "the PGWAL to be created")
+		"the cluster")
+	cmd.Flags().StringVar(&pgData, "pg-data", os.Getenv("PGDATA"), "The PGDATA to be restored")
+	cmd.Flags().StringVar(&pgWal, "pg-wal", "", "the PGWAL to be restored")
 
 	return cmd
 }

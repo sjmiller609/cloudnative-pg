@@ -30,8 +30,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,7 +108,7 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context, cli client.Client) err
 	}
 
 	backup := externalClusterToBackup(externalCluster, nil)
-	if err := info.restoreInstance(ctx, backup, env, cluster, cli, false); err != nil {
+	if err := info.restoreInstance(ctx, cluster, cli, restoreInstanceConfiguration{env: env, backup: backup}); err != nil {
 		return err
 	}
 
@@ -147,23 +145,31 @@ func (info InitInfo) Restore(ctx context.Context) error {
 		return err
 	}
 
-	if err := info.restoreInstance(ctx, backup, env, cluster, typedClient, true); err != nil {
+	if err := info.restoreInstance(ctx, cluster, typedClient, restoreInstanceConfiguration{
+		backup:         backup,
+		env:            env,
+		restoreDataDir: true,
+	}); err != nil {
 		return err
 	}
 
 	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
 }
 
+type restoreInstanceConfiguration struct {
+	backup         *apiv1.Backup
+	env            []string
+	restoreDataDir bool
+}
+
 func (info InitInfo) restoreInstance(
 	ctx context.Context,
-	backup *apiv1.Backup,
-	env []string,
 	cluster *apiv1.Cluster,
 	typedClient client.Client,
-	restoreDataDir bool,
+	config restoreInstanceConfiguration,
 ) error {
-	if restoreDataDir {
-		if err := info.restoreDataDir(backup, env); err != nil {
+	if config.restoreDataDir {
+		if err := info.restoreDataDir(config.backup, config.env); err != nil {
 			return err
 		}
 	}
@@ -196,11 +202,7 @@ func (info InitInfo) restoreInstance(
 		return err
 	}
 
-	if err := info.writeRestoreWalConfig(backup, cluster); err != nil {
-		return err
-	}
-
-	return nil
+	return info.writeRestoreWalConfig(config.backup, cluster)
 }
 
 // restoreCustomWalDir moves the current pg_wal data to the specified custom wal dir and applies the symlink
@@ -327,7 +329,12 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 		return nil, nil, err
 	}
 
-	backupCatalog, err := barman.GetBackupList(ctx, externalCluster.BarmanObjectStore, externalCluster.GetServerName(), env)
+	backupCatalog, err := barman.GetBackupList(
+		ctx,
+		externalCluster.BarmanObjectStore,
+		externalCluster.GetServerName(),
+		env,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -342,7 +349,6 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 	} else {
 		targetBackup = backupCatalog.LatestBackupInfo()
 	}
-
 	if targetBackup == nil {
 		return nil, nil, fmt.Errorf("no target backup found")
 	}
@@ -350,7 +356,7 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 	log.Info("Target backup found", "backup", targetBackup)
 
 	backup := externalClusterToBackup(externalCluster, targetBackup)
-	return backup, env, err
+	return backup, env, nil
 }
 
 // loadBackupFromReference loads a backup object and the required credentials given the backup object resource
@@ -743,7 +749,8 @@ func waitUntilRecoveryFinishes(db *sql.DB) error {
 	})
 }
 
-// externalClusterToBackup builds a Backup resource from the ExternalCluster. This resource can be ingested into a restore process.
+// externalClusterToBackup builds a Backup resource from the ExternalCluster. This resource can be ingested into
+// a restore process.
 func externalClusterToBackup(external apiv1.ExternalCluster, targetBackup *catalog.BarmanBackup) *apiv1.Backup {
 	serverName := external.GetServerName()
 
