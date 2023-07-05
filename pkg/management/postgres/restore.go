@@ -102,13 +102,65 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context, cli client.Client) err
 		return fmt.Errorf("missing external cluster: %v", sourceName)
 	}
 
-	env, err := getBarmanEnvFromExternalCluster(ctx, externalCluster, cli, cluster.Namespace)
+	env, err := barmanCredentials.EnvSetRestoreCloudCredentials(
+		ctx,
+		cli,
+		cluster.Namespace,
+		externalCluster.BarmanObjectStore,
+		os.Environ(),
+	)
 	if err != nil {
 		return err
 	}
 
-	backup := externalClusterToBackup(externalCluster, nil)
-	if err := info.restoreInstance(ctx, cluster, cli, restoreInstanceConfiguration{env: env, backup: backup}); err != nil {
+	serverName := externalCluster.GetServerName()
+
+	backup := &apiv1.Backup{
+		Spec: apiv1.BackupSpec{
+			Cluster: apiv1.LocalObjectReference{
+				Name: serverName,
+			},
+		},
+		Status: apiv1.BackupStatus{
+			BarmanCredentials: externalCluster.BarmanObjectStore.BarmanCredentials,
+			EndpointCA:        externalCluster.BarmanObjectStore.EndpointCA,
+			EndpointURL:       externalCluster.BarmanObjectStore.EndpointURL,
+			DestinationPath:   externalCluster.BarmanObjectStore.DestinationPath,
+			ServerName:        serverName,
+			Phase:             apiv1.BackupPhaseCompleted,
+		},
+	}
+
+	if _, err := info.restoreCustomWalDir(ctx); err != nil {
+		return err
+	}
+
+	if err := info.WriteInitialPostgresqlConf(cluster); err != nil {
+		return err
+	}
+
+	if cluster.IsReplica() {
+		server, ok := cluster.ExternalCluster(cluster.Spec.ReplicaCluster.Source)
+		if !ok {
+			return fmt.Errorf("missing external cluster: %v", cluster.Spec.ReplicaCluster.Source)
+		}
+
+		connectionString, _, err := external.ConfigureConnectionToServer(
+			ctx, cli, info.Namespace, &server)
+		if err != nil {
+			return err
+		}
+
+		// TODO: Using a replication slot on replica cluster is not supported (yet?)
+		_, err = UpdateReplicaConfiguration(info.PgData, connectionString, "")
+		return err
+	}
+
+	if err := info.WriteRestoreHbaConf(); err != nil {
+		return err
+	}
+
+	if err := info.writeRestoreWalConfig(backup, cluster); err != nil {
 		return err
 	}
 
@@ -145,33 +197,8 @@ func (info InitInfo) Restore(ctx context.Context) error {
 		return err
 	}
 
-	if err := info.restoreInstance(ctx, cluster, typedClient, restoreInstanceConfiguration{
-		backup:         backup,
-		env:            env,
-		restoreDataDir: true,
-	}); err != nil {
+	if err := info.restoreDataDir(backup, env); err != nil {
 		return err
-	}
-
-	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
-}
-
-type restoreInstanceConfiguration struct {
-	backup         *apiv1.Backup
-	env            []string
-	restoreDataDir bool
-}
-
-func (info InitInfo) restoreInstance(
-	ctx context.Context,
-	cluster *apiv1.Cluster,
-	typedClient client.Client,
-	config restoreInstanceConfiguration,
-) error {
-	if config.restoreDataDir {
-		if err := info.restoreDataDir(config.backup, config.env); err != nil {
-			return err
-		}
 	}
 
 	if _, err := info.restoreCustomWalDir(ctx); err != nil {
@@ -188,7 +215,8 @@ func (info InitInfo) restoreInstance(
 			return fmt.Errorf("missing external cluster: %v", cluster.Spec.ReplicaCluster.Source)
 		}
 
-		connectionString, _, err := external.ConfigureConnectionToServer(ctx, typedClient, info.Namespace, &server)
+		connectionString, _, err := external.ConfigureConnectionToServer(
+			ctx, typedClient, info.Namespace, &server)
 		if err != nil {
 			return err
 		}
@@ -202,7 +230,11 @@ func (info InitInfo) restoreInstance(
 		return err
 	}
 
-	return info.writeRestoreWalConfig(config.backup, cluster)
+	if err := info.writeRestoreWalConfig(backup, cluster); err != nil {
+		return err
+	}
+
+	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
 }
 
 // restoreCustomWalDir moves the current pg_wal data to the specified custom wal dir and applies the symlink
@@ -314,34 +346,31 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 
 	log.Info("Recovering from external cluster", "sourceName", sourceName)
 
-	externalCluster, found := cluster.ExternalCluster(sourceName)
+	server, found := cluster.ExternalCluster(sourceName)
 	if !found {
 		return nil, nil, fmt.Errorf("missing external cluster: %v", sourceName)
 	}
+	serverName := server.GetServerName()
 
-	env, err := getBarmanEnvFromExternalCluster(
+	env, err := barmanCredentials.EnvSetRestoreCloudCredentials(
 		ctx,
-		externalCluster,
 		typedClient,
 		cluster.Namespace,
-	)
+		server.BarmanObjectStore,
+		os.Environ())
 	if err != nil {
 		return nil, nil, err
 	}
 
-	backupCatalog, err := barman.GetBackupList(
-		ctx,
-		externalCluster.BarmanObjectStore,
-		externalCluster.GetServerName(),
-		env,
-	)
+	backupCatalog, err := barman.GetBackupList(ctx, server.BarmanObjectStore, serverName, env)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// We are now choosing the right backup to restore
 	var targetBackup *catalog.BarmanBackup
-	if cluster.Spec.Bootstrap.Recovery != nil && cluster.Spec.Bootstrap.Recovery.RecoveryTarget != nil {
+	if cluster.Spec.Bootstrap.Recovery != nil &&
+		cluster.Spec.Bootstrap.Recovery.RecoveryTarget != nil {
 		targetBackup, err = backupCatalog.FindBackupInfo(cluster.Spec.Bootstrap.Recovery.RecoveryTarget)
 		if err != nil {
 			return nil, nil, err
@@ -355,8 +384,31 @@ func (info InitInfo) loadBackupObjectFromExternalCluster(
 
 	log.Info("Target backup found", "backup", targetBackup)
 
-	backup := externalClusterToBackup(externalCluster, targetBackup)
-	return backup, env, nil
+	return &apiv1.Backup{
+		Spec: apiv1.BackupSpec{
+			Cluster: apiv1.LocalObjectReference{
+				Name: serverName,
+			},
+		},
+		Status: apiv1.BackupStatus{
+			BarmanCredentials: server.BarmanObjectStore.BarmanCredentials,
+			EndpointCA:        server.BarmanObjectStore.EndpointCA,
+			EndpointURL:       server.BarmanObjectStore.EndpointURL,
+			DestinationPath:   server.BarmanObjectStore.DestinationPath,
+			ServerName:        serverName,
+			BackupID:          targetBackup.ID,
+			Phase:             apiv1.BackupPhaseCompleted,
+			StartedAt:         &metav1.Time{Time: targetBackup.BeginTime},
+			StoppedAt:         &metav1.Time{Time: targetBackup.EndTime},
+			BeginWal:          targetBackup.BeginWal,
+			EndWal:            targetBackup.EndWal,
+			BeginLSN:          targetBackup.BeginLSN,
+			EndLSN:            targetBackup.EndLSN,
+			Error:             targetBackup.Error,
+			CommandOutput:     "",
+			CommandError:      "",
+		},
+	}, env, nil
 }
 
 // loadBackupFromReference loads a backup object and the required credentials given the backup object resource
@@ -399,6 +451,7 @@ func (info InitInfo) loadBackupFromReference(
 // as a new primary
 func (info InitInfo) writeRestoreWalConfig(backup *apiv1.Backup, cluster *apiv1.Cluster) error {
 	const barmanCloudWalRestoreName = "barman-cloud-wal-restore"
+	var err error
 
 	cmd := []string{barmanCloudWalRestoreName}
 	if backup.Status.EndpointURL != "" {
@@ -407,7 +460,7 @@ func (info InitInfo) writeRestoreWalConfig(backup *apiv1.Backup, cluster *apiv1.
 	cmd = append(cmd, backup.Status.DestinationPath)
 	cmd = append(cmd, backup.Status.ServerName)
 
-	cmd, err := barman.AppendCloudProviderOptionsFromBackup(cmd, backup)
+	cmd, err = barman.AppendCloudProviderOptionsFromBackup(cmd, backup)
 	if err != nil {
 		return err
 	}
@@ -747,55 +800,4 @@ func waitUntilRecoveryFinishes(db *sql.DB) error {
 
 		return nil
 	})
-}
-
-// externalClusterToBackup builds a Backup resource from the ExternalCluster. This resource can be ingested into
-// a restore process.
-func externalClusterToBackup(external apiv1.ExternalCluster, targetBackup *catalog.BarmanBackup) *apiv1.Backup {
-	serverName := external.GetServerName()
-
-	backup := &apiv1.Backup{
-		Spec: apiv1.BackupSpec{
-			Cluster: apiv1.LocalObjectReference{
-				Name: serverName,
-			},
-		},
-		Status: apiv1.BackupStatus{
-			BarmanCredentials: external.BarmanObjectStore.BarmanCredentials,
-			EndpointCA:        external.BarmanObjectStore.EndpointCA,
-			EndpointURL:       external.BarmanObjectStore.EndpointURL,
-			DestinationPath:   external.BarmanObjectStore.DestinationPath,
-			ServerName:        serverName,
-			Phase:             apiv1.BackupPhaseCompleted,
-		},
-	}
-
-	if targetBackup != nil {
-		backup.Status.BackupID = targetBackup.ID
-		backup.Status.StartedAt = &metav1.Time{Time: targetBackup.BeginTime}
-		backup.Status.StoppedAt = &metav1.Time{Time: targetBackup.EndTime}
-		backup.Status.BeginWal = targetBackup.BeginWal
-		backup.Status.EndWal = targetBackup.EndWal
-		backup.Status.BeginLSN = targetBackup.BeginLSN
-		backup.Status.EndLSN = targetBackup.EndLSN
-		backup.Status.Error = targetBackup.Error
-	}
-
-	return backup
-}
-
-// getBarmanEnvFromExternalCluster returns an array of env variables needed by the barman process
-func getBarmanEnvFromExternalCluster(
-	ctx context.Context,
-	in apiv1.ExternalCluster,
-	typedClient client.Client,
-	namespace string,
-) ([]string, error) {
-	return barmanCredentials.EnvSetRestoreCloudCredentials(
-		ctx,
-		typedClient,
-		namespace,
-		in.BarmanObjectStore,
-		os.Environ(),
-	)
 }
