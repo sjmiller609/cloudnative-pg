@@ -97,38 +97,9 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context, cli client.Client) err
 
 	log.Info("Recovering from external cluster", "sourceName", sourceName)
 
-	externalCluster, found := cluster.ExternalCluster(sourceName)
-	if !found {
-		return fmt.Errorf("missing external cluster: %v", sourceName)
-	}
-
-	env, err := barmanCredentials.EnvSetRestoreCloudCredentials(
-		ctx,
-		cli,
-		cluster.Namespace,
-		externalCluster.BarmanObjectStore,
-		os.Environ(),
-	)
+	backup, env, err := info.createBackupObjectForSnapshotRestore(ctx, cli, cluster)
 	if err != nil {
 		return err
-	}
-
-	serverName := externalCluster.GetServerName()
-
-	backup := &apiv1.Backup{
-		Spec: apiv1.BackupSpec{
-			Cluster: apiv1.LocalObjectReference{
-				Name: serverName,
-			},
-		},
-		Status: apiv1.BackupStatus{
-			BarmanCredentials: externalCluster.BarmanObjectStore.BarmanCredentials,
-			EndpointCA:        externalCluster.BarmanObjectStore.EndpointCA,
-			EndpointURL:       externalCluster.BarmanObjectStore.EndpointURL,
-			DestinationPath:   externalCluster.BarmanObjectStore.DestinationPath,
-			ServerName:        serverName,
-			Phase:             apiv1.BackupPhaseCompleted,
-		},
 	}
 
 	if _, err := info.restoreCustomWalDir(ctx); err != nil {
@@ -165,6 +136,54 @@ func (info InitInfo) RestoreSnapshot(ctx context.Context, cli client.Client) err
 	}
 
 	return info.ConfigureInstanceAfterRestore(ctx, cluster, env)
+}
+
+// createBackupObjectForSnapshotRestore creates a fake Backup object that can be used during the
+// snapshot restore process
+func (info InitInfo) createBackupObjectForSnapshotRestore(
+	ctx context.Context,
+	typedClient client.Client,
+	cluster *apiv1.Cluster,
+) (*apiv1.Backup, []string, error) {
+	sourceName := cluster.Spec.Bootstrap.Recovery.Source
+
+	if sourceName == "" {
+		return nil, nil, fmt.Errorf("recovery source not specified")
+	}
+
+	log.Info("Recovering from external cluster", "sourceName", sourceName)
+
+	server, found := cluster.ExternalCluster(sourceName)
+	if !found {
+		return nil, nil, fmt.Errorf("missing external cluster: %v", sourceName)
+	}
+	serverName := server.GetServerName()
+
+	env, err := barmanCredentials.EnvSetRestoreCloudCredentials(
+		ctx,
+		typedClient,
+		cluster.Namespace,
+		server.BarmanObjectStore,
+		os.Environ())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &apiv1.Backup{
+		Spec: apiv1.BackupSpec{
+			Cluster: apiv1.LocalObjectReference{
+				Name: serverName,
+			},
+		},
+		Status: apiv1.BackupStatus{
+			BarmanCredentials: server.BarmanObjectStore.BarmanCredentials,
+			EndpointCA:        server.BarmanObjectStore.EndpointCA,
+			EndpointURL:       server.BarmanObjectStore.EndpointURL,
+			DestinationPath:   server.BarmanObjectStore.DestinationPath,
+			ServerName:        serverName,
+			Phase:             apiv1.BackupPhaseCompleted,
+		},
+	}, env, nil
 }
 
 // Restore restores a PostgreSQL cluster from a backup into the object storage
